@@ -30,7 +30,7 @@ type dependencyInfo struct {
 	scope        Scope
 	instance     atomic.Value
 	initOnce     sync.Once
-	hooks        reflect.Value
+	hooks        interface{}
 	instancePool sync.Map
 }
 
@@ -100,10 +100,10 @@ func (c *Container) Resolve(typ reflect.Type, options ...interface{}) (interface
 	return c.resolveDependency(info)
 }
 
-func (c *Container) processOptions(typ reflect.Type, options ...interface{}) (string, Scope, reflect.Value) {
+func (c *Container) processOptions(typ reflect.Type, options ...interface{}) (string, Scope, interface{}) {
 	var name string
 	scope := Singleton
-	var hooks reflect.Value
+	var hooks interface{}
 
 	for _, option := range options {
 		switch v := option.(type) {
@@ -112,9 +112,8 @@ func (c *Container) processOptions(typ reflect.Type, options ...interface{}) (st
 		case Scope:
 			scope = v
 		default:
-			hookType := reflect.TypeOf((*LifecycleHooks[interface{}])(nil)).Elem()
-			if reflect.TypeOf(v).ConvertibleTo(hookType) {
-				hooks = reflect.ValueOf(v)
+			if h, ok := isLifecycleHooks(v); ok {
+				hooks = h
 			}
 		}
 	}
@@ -158,7 +157,7 @@ func (c *Container) resolveDependency(info *dependencyInfo) (interface{}, error)
 	case Singleton:
 		return c.resolveSingleton(info)
 	case Prototype:
-		return c.construct(info.constructor, info.hooks)
+		return c.construct(info)
 	case Request:
 		return c.resolveRequest(info)
 	default:
@@ -170,7 +169,7 @@ func (c *Container) resolveSingleton(info *dependencyInfo) (interface{}, error) 
 	var err error
 	info.initOnce.Do(func() {
 		var instance interface{}
-		instance, err = c.construct(info.constructor, info.hooks)
+		instance, err = c.construct(info)
 		if err == nil {
 			info.instance.Store(instance)
 		}
@@ -189,7 +188,7 @@ func (c *Container) resolveRequest(info *dependencyInfo) (interface{}, error) {
 		return instance, nil
 	}
 
-	instance, err := c.construct(info.constructor, info.hooks)
+	instance, err := c.construct(info)
 	if err != nil {
 		return nil, err
 	}
@@ -198,29 +197,30 @@ func (c *Container) resolveRequest(info *dependencyInfo) (interface{}, error) {
 	return instance, nil
 }
 
-func (c *Container) construct(constructor reflect.Value, hooks reflect.Value) (interface{}, error) {
-	params, err := c.resolveConstructorParams(constructor.Type())
+func (c *Container) construct(info *dependencyInfo) (interface{}, error) {
+	params, err := c.resolveConstructorParams(info.constructor.Type())
 	if err != nil {
 		return nil, err
 	}
 
-	results := constructor.Call(params)
+	results := info.constructor.Call(params)
 	if len(results) == 2 && !results[1].IsNil() {
 		return nil, results[1].Interface().(error)
 	}
 
 	instance := results[0].Interface()
 
-	if !hooks.IsValid() {
-		return instance, nil
-	}
-
-	if err := c.runHook(hooks, "OnInit", instance); err != nil {
-		return nil, err
-	}
-
-	if err := c.runHook(hooks, "OnStart", instance); err != nil {
-		return nil, err
+	if hooks, ok := info.hooks.(LifecycleHooks[interface{}]); ok {
+		if hooks.OnInit != nil {
+			if err := hooks.OnInit(instance); err != nil {
+				return nil, err
+			}
+		}
+		if hooks.OnStart != nil {
+			if err := hooks.OnStart(instance); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	return instance, nil
@@ -237,47 +237,6 @@ func (c *Container) resolveConstructorParams(constructorType reflect.Type) ([]re
 		params[i] = reflect.ValueOf(param)
 	}
 	return params, nil
-}
-
-func (c *Container) destroyDependency(info *dependencyInfo) error {
-	if !info.hooks.IsValid() {
-		return nil
-	}
-
-	switch info.scope {
-	case Singleton:
-		instance := info.instance.Load()
-		if instance != nil {
-			return c.runHook(info.hooks, "OnDestroy", instance)
-		}
-	case Request:
-		var err error
-		info.instancePool.Range(func(_, value interface{}) bool {
-			if e := c.runHook(info.hooks, "OnDestroy", value); e != nil {
-				err = e
-				return false
-			}
-			return true
-		})
-		return err
-	default:
-		panic("unhandled default case")
-	}
-
-	return nil
-}
-
-func (c *Container) runHook(hooks reflect.Value, hookName string, instance interface{}) error {
-	method := hooks.MethodByName(hookName)
-	if !method.IsValid() {
-		return nil
-	}
-
-	results := method.Call([]reflect.Value{reflect.ValueOf(instance)})
-	if len(results) > 0 && !results[0].IsNil() {
-		return results[0].Interface().(error)
-	}
-	return nil
 }
 
 // AutoWire automatically injects dependencies into the fields of the given struct
@@ -297,12 +256,13 @@ func (c *Container) AutoWire(target interface{}) error {
 		}
 
 		tag := t.Field(i).Tag.Get("autowire")
-		if tag == "" {
+
+		if tag == "-" {
 			continue
 		}
 
 		var options []interface{}
-		if tag != "-" {
+		if tag != "" {
 			options = append(options, tag)
 		}
 
@@ -323,8 +283,15 @@ func (c *Container) Destroy() error {
 
 	for _, implementations := range c.dependencies {
 		for _, info := range implementations {
-			if err := c.destroyDependency(info); err != nil {
-				return err
+			if hooks, ok := info.hooks.(LifecycleHooks[interface{}]); ok {
+				if hooks.OnDestroy != nil {
+					instance := info.instance.Load()
+					if instance != nil {
+						if err := hooks.OnDestroy(instance); err != nil {
+							return err
+						}
+					}
+				}
 			}
 		}
 	}
@@ -365,6 +332,57 @@ func getDefaultName(t reflect.Type) string {
 
 func getGoroutineID() uint64 {
 	return uint64(reflect.ValueOf(make(chan int)).Pointer())
+}
+
+func isLifecycleHooks(v interface{}) (LifecycleHooks[interface{}], bool) {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Struct {
+		return LifecycleHooks[interface{}]{}, false
+	}
+
+	rt := rv.Type()
+	if rt.NumField() != 3 {
+		return LifecycleHooks[interface{}]{}, false
+	}
+
+	onInitField, hasOnInit := rt.FieldByName("OnInit")
+	onStartField, hasOnStart := rt.FieldByName("OnStart")
+	onDestroyField, hasOnDestroy := rt.FieldByName("OnDestroy")
+
+	if !hasOnInit || !hasOnStart || !hasOnDestroy {
+		return LifecycleHooks[interface{}]{}, false
+	}
+
+	isValidHook := func(f reflect.StructField) bool {
+		return f.Type.Kind() == reflect.Func &&
+			f.Type.NumIn() == 1 &&
+			f.Type.NumOut() == 1 &&
+			f.Type.Out(0) == reflect.TypeOf((*error)(nil)).Elem()
+	}
+
+	if !isValidHook(onInitField) || !isValidHook(onStartField) || !isValidHook(onDestroyField) {
+		return LifecycleHooks[interface{}]{}, false
+	}
+
+	return LifecycleHooks[interface{}]{
+		OnInit:    convertToInterfaceFunc(rv.FieldByName("OnInit")),
+		OnStart:   convertToInterfaceFunc(rv.FieldByName("OnStart")),
+		OnDestroy: convertToInterfaceFunc(rv.FieldByName("OnDestroy")),
+	}, true
+}
+
+func convertToInterfaceFunc(v reflect.Value) func(interface{}) error {
+	if v.IsNil() {
+		return nil
+	}
+	return func(i interface{}) error {
+		results := v.Call([]reflect.Value{reflect.ValueOf(i)})
+		if len(results) == 0 {
+			return nil
+		}
+		err, _ := results[0].Interface().(error)
+		return err
+	}
 }
 
 // Type-safe wrappers

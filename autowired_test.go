@@ -122,7 +122,9 @@ func TestAutoWire(t *testing.T) {
 	}
 
 	type TestApp struct {
-		Service *TestService `autowire:""`
+		Service        *TestService `autowire:""`
+		AnotherService *TestService // No tag
+		IgnoredService *TestService `autowire:"-"`
 	}
 
 	app := &TestApp{}
@@ -132,7 +134,15 @@ func TestAutoWire(t *testing.T) {
 	}
 
 	if app.Service == nil {
-		t.Error("TestService should have been auto-wired")
+		t.Error("TestService with empty tag should have been auto-wired")
+	}
+
+	if app.AnotherService == nil {
+		t.Error("TestService without tag should have been auto-wired")
+	}
+
+	if app.IgnoredService != nil {
+		t.Error("TestService with '-' tag should not have been auto-wired")
 	}
 }
 
