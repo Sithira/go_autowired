@@ -1,23 +1,24 @@
-# @AutoWired for Go
+# @AutoWired for Go (v2)
 
-`autowired_v2` is a powerful and flexible dependency injection container for Go applications. It provides a robust set of features for managing dependencies, including lifecycle management, scoping, and automatic wiring of structs.
+`autowired` is a powerful and flexible dependency injection container for Go applications. It provides a robust set of features for managing dependencies, including lifecycle management, scoping, and automatic wiring of structs. This package is designed to simplify dependency management in complex Go applications while maintaining type safety and allowing for flexible configuration.
 
 ## Features
 
 - Dependency registration with custom names and scopes
-- Singleton, Prototype, and Request scopes
+- Support for Singleton, Prototype, and Request scopes
 - Lifecycle hooks (OnInit, OnStart, OnDestroy)
-- Automatic dependency resolution
+- Automatic dependency resolution with circular dependency detection
 - Type-safe wrappers for common operations
 - Struct field auto-wiring
 - Thread-safe operations
+- Lazy dependency resolution
 
 ## Installation
 
-To use `autowired_v2` in your Go project, you can install it using:
+To use `autowired` in your Go project, you can install it using:
 
-```
-go get github.com/yourusername/autowired_v2
+```bash
+go get github.com/yourusername/autowired
 ```
 
 Replace `yourusername` with the appropriate GitHub username or organization.
@@ -27,23 +28,37 @@ Replace `yourusername` with the appropriate GitHub username or organization.
 ### Creating a Container
 
 ```go
-container := autowired_v2.NewContainer()
+container := autowired.NewContainer()
 ```
 
 ### Registering Dependencies
 
-```go
-type MyService struct {}
+You can register dependencies with different scopes:
 
-err := autowired_v2.Register[MyService](container, func() *MyService {
+```go
+// Singleton (default)
+err := autowired.Register[MyService](container, func() *MyService {
     return &MyService{}
 })
+
+// Prototype
+err := autowired.Register[MyPrototypeService](container, func() *MyPrototypeService {
+    return &MyPrototypeService{}
+}, autowired.Prototype)
+
+// Request
+err := autowired.Register[MyRequestService](container, func() *MyRequestService {
+    return &MyRequestService{}
+}, autowired.Request)
 ```
 
 ### Resolving Dependencies
 
 ```go
-service, err := autowired_v2.Resolve[*MyService](container)
+service, err := autowired.Resolve[*MyService](container)
+if err != nil {
+    // Handle error
+}
 ```
 
 ### Auto-wiring Structs
@@ -54,46 +69,17 @@ type MyApp struct {
 }
 
 app := &MyApp{}
-err := autowired_v2.AutoWire(container, app)
-```
-
-### Using Prototype-Scoped Dependencies
-
-Prototype-scoped dependencies are useful when you want a new instance of a dependency every time it's resolved, regardless of where or how often it's requested. Here's how to use them:
-
-1. Register a prototype-scoped dependency:
-
-```go
-err := autowired_v2.Register[MyPrototypeService](container, func() *MyPrototypeService {
-    return &MyPrototypeService{}
-}, autowired_v2.Prototype)
-```
-
-2. Resolve the dependency:
-
-```go
-service1, err := autowired_v2.Resolve[*MyPrototypeService](container)
+err := autowired.AutoWire(container, app)
 if err != nil {
     // Handle error
 }
-
-service2, err := autowired_v2.Resolve[*MyPrototypeService](container)
-if err != nil {
-    // Handle error
-}
-
-// service1 and service2 are different instances
 ```
 
-Key points about Prototype-scoped dependencies:
+### Using Scoped Dependencies
 
-- A new instance is created every time the dependency is resolved.
-- There's no shared state between different instances of the same prototype-scoped dependency.
-- Prototype scope is useful for stateful services where you don't want to share state between different parts of your application.
-- Unlike Singleton-scoped dependencies, you don't need to worry about concurrent access to prototype-scoped dependencies, as each resolution gets its own instance.
-- Unlike Request-scoped dependencies, prototype-scoped dependencies don't need to be cleared after use.
+#### Singleton Scope (Default)
 
-Example use case:
+Singleton-scoped dependencies are created once and reused for all resolutions:
 
 ```go
 type Counter struct {
@@ -104,121 +90,136 @@ func (c *Counter) Increment() {
     c.count++
 }
 
-func (c *Counter) GetCount() int {
-    return c.count
-}
-
-// Register the Counter as a prototype-scoped dependency
-err := autowired_v2.Register[Counter](container, func() *Counter {
+err := autowired.Register[Counter](container, func() *Counter {
     return &Counter{}
-}, autowired_v2.Prototype)
+})
 
-// In different parts of your application:
-counter1, _ := autowired_v2.Resolve[*Counter](container)
+counter1, _ := autowired.Resolve[*Counter](container)
 counter1.Increment()
-counter1.Increment()
-fmt.Println(counter1.GetCount()) // Output: 2
 
-counter2, _ := autowired_v2.Resolve[*Counter](container)
+counter2, _ := autowired.Resolve[*Counter](container)
 counter2.Increment()
-fmt.Println(counter2.GetCount()) // Output: 1
+
+fmt.Println(counter1.count) // Output: 2
+fmt.Println(counter2.count) // Output: 2 (same instance)
 ```
 
-In this example, `counter1` and `counter2` are separate instances, each with its own state.
+#### Prototype Scope
 
-Prototype scope is particularly useful when:
-- You need a fresh instance of a dependency each time it's used
-- The dependency has mutable state that shouldn't be shared
-- You want to avoid potential concurrency issues that might arise with shared instances
-
-Remember, while prototype-scoped dependencies provide a new instance each time, they can lead to increased memory usage if overused. Consider the trade-offs between Singleton, Request, and Prototype scopes based on your specific use case.
-
-### Using Request-Scoped Dependencies
-
-Request-scoped dependencies are particularly useful in web applications where you want to create a new instance of a dependency for each incoming request. Here's how to use them:
-
-1. Register a request-scoped dependency:
+Prototype-scoped dependencies are created anew for each resolution:
 
 ```go
-err := autowired_v2.Register[MyRequestScopedService](container, func() *MyRequestScopedService {
-    return &MyRequestScopedService{}
-}, autowired_v2.Request)
+err := autowired.Register[Counter](container, func() *Counter {
+    return &Counter{}
+}, autowired.Prototype)
+
+counter1, _ := autowired.Resolve[*Counter](container)
+counter1.Increment()
+
+counter2, _ := autowired.Resolve[*Counter](container)
+counter2.Increment()
+
+fmt.Println(counter1.count) // Output: 1
+fmt.Println(counter2.count) // Output: 1 (different instance)
 ```
 
-2. Resolve the dependency within a request handler:
+#### Request Scope
+
+Request-scoped dependencies are created once per goroutine (typically per HTTP request):
 
 ```go
-func handleRequest(w http.ResponseWriter, r *http.Request) {
-    service, err := autowired_v2.Resolve[*MyRequestScopedService](container)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-    }
+err := autowired.Register[RequestContext](container, func() *RequestContext {
+    return &RequestContext{}
+}, autowired.Request)
+
+http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+    ctx, _ := autowired.Resolve[*RequestContext](container)
+    // Use ctx...
     
-    // Use the service...
-}
+    defer container.ClearRequestScoped()
+})
 ```
-
-3. Clear request-scoped dependencies after handling the request:
-
-```go
-func middleware(next http.HandlerFunc) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        defer container.ClearRequestScoped()
-        next(w, r)
-    }
-}
-```
-
-4. Use the middleware in your HTTP server setup:
-
-```go
-http.HandleFunc("/", middleware(handleRequest))
-```
-
-When using request-scoped dependencies:
-
-- A new instance is created for each goroutine (typically corresponding to a single request in web applications).
-- The same instance is returned for subsequent resolutions within the same goroutine.
-- You must call `container.ClearRequestScoped()` after each request to clean up the instances and prevent memory leaks.
-
-Remember that request-scoped dependencies are tied to the lifetime of a single request or goroutine. They are useful for maintaining state that should not be shared between different requests, such as user-specific information or request-specific caches.
 
 ### Lifecycle Hooks
 
+You can define lifecycle hooks for your dependencies:
+
 ```go
-hooks := autowired_v2.LifecycleHooks[*MyService]{
+hooks := autowired.LifecycleHooks[*MyService]{
     OnInit: func(s *MyService) error {
-        // Initialization logic
+        fmt.Println("Initializing MyService")
         return nil
     },
     OnStart: func(s *MyService) error {
-        // Start-up logic
+        fmt.Println("Starting MyService")
         return nil
     },
     OnDestroy: func(s *MyService) error {
-        // Clean-up logic
+        fmt.Println("Destroying MyService")
         return nil
     },
 }
 
-err := autowired_v2.Register[MyService](container, func() *MyService {
+err := autowired.Register[MyService](container, func() *MyService {
     return &MyService{}
 }, hooks)
 ```
 
+### Handling Circular Dependencies
 
+The container automatically detects circular dependencies:
 
-## Advanced Features
+```go
+err := autowired.Register[ServiceA](container, func(b *ServiceB) *ServiceA {
+    return &ServiceA{B: b}
+})
 
-- Custom naming for dependencies
-- Request-scoped dependencies
-- Clearing request-scoped dependencies
-- Container destruction and resource cleanup
+err := autowired.Register[ServiceB](container, func(a *ServiceA) *ServiceB {
+    return &ServiceB{A: a}
+})
+
+// This will return an error due to circular dependency
+_, err := autowired.Resolve[*ServiceA](container)
+if err != nil {
+    fmt.Println("Circular dependency detected:", err)
+}
+```
+
+### Custom Naming
+
+You can register dependencies with custom names:
+
+```go
+err := autowired.Register[MyService](container, func() *MyService {
+    return &MyService{}
+}, "customName")
+
+service, err := autowired.Resolve[*MyService](container, "customName")
+```
+
+### Container Cleanup
+
+Don't forget to clean up the container when you're done:
+
+```go
+err := container.Destroy()
+if err != nil {
+    // Handle error
+}
+```
+
+## Best Practices
+
+1. Use Singleton scope for stateless services or when you want to share state across the application.
+2. Use Prototype scope when you need a fresh instance each time or for stateful services that shouldn't share state.
+3. Use Request scope in web applications for request-specific data.
+4. Always handle errors returned by Register, Resolve, and AutoWire.
+5. Use lifecycle hooks for proper resource management.
+6. Avoid circular dependencies in your application design.
 
 ## Thread Safety
 
-The `autowired_v2` package is designed to be thread-safe, allowing for concurrent use in multi-threaded applications.
+The `autowired` package is designed to be thread-safe, allowing for concurrent use in multi-threaded applications. However, be mindful of the thread safety of the dependencies you're managing within the container.
 
 ## Contributing
 
