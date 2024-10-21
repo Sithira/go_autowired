@@ -1,5 +1,7 @@
 # @AutoWired for Go 🚀
 
+<img alt="autowired_golang" height="300" src="/golang_autowired_logo.webp" title="GoLang Autowired" width="300"/>
+
 `autowired` is a powerful and flexible dependency injection container for Go applications. It provides a robust set of features for managing dependencies, including lifecycle management, scoping, and automatic wiring of structs. This package is designed to simplify dependency management in complex Go applications while maintaining type safety and allowing for flexible configuration.
 
 ## Features
